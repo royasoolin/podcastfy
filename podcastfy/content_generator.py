@@ -309,14 +309,17 @@ class ContentCleanerMixin:
             return text
 
     @staticmethod
-    def _clean_tss_markup(
+    def _clean_tts_markup(
         input_text: str, 
-        additional_tags: List[str] = ["Person1", "Person2"]
+        additional_tags: List[str] = None
     ) -> str:
         """
         Remove unsupported TSS markup tags while preserving supported ones.
         """
         try:
+            if additional_tags is None:
+                additional_tags = ["Person1", "Person2", "Host"]
+                
             input_text = ContentCleanerMixin._clean_scratchpad(input_text)
             supported_tags = ["speak", "lang", "p", "phoneme", "s", "sub"]
             supported_tags.extend(additional_tags)
@@ -333,8 +336,6 @@ class ContentCleanerMixin:
                     cleaned_text,
                     flags=re.DOTALL,
                 )
-            
-
 
             return cleaned_text.strip()
             
@@ -418,7 +419,7 @@ class StandardContentStrategy(ContentGenerationStrategy, ContentCleanerMixin):
              response: str,
              config: Dict[str, Any]) -> str:
         """Apply basic TSS markup cleaning."""
-        return self._clean_tss_markup(response)
+        return self._clean_tts_markup(response)
 
     def compose_prompt_params(self,
                             config_conversation: Dict[str, Any],
@@ -499,7 +500,7 @@ class LongFormContentStrategy(ContentGenerationStrategy, ContentCleanerMixin):
              config: Dict[str, Any]) -> str:
         """Apply enhanced cleaning for long-form content."""
         # First apply standard cleaning using common method
-        standard_clean = self._clean_tss_markup(response)
+        standard_clean = self._clean_tts_markup(response)
         # Then apply additional long-form specific cleaning
         return self._clean_transcript_response(standard_clean, config)
     
@@ -702,6 +703,75 @@ class LongFormContentStrategy(ContentGenerationStrategy, ContentCleanerMixin):
         }
 
 
+class SingleHostContentStrategy(ContentGenerationStrategy, ContentCleanerMixin):
+    """
+    Strategy for generating single-host content.
+    """
+    
+    def __init__(self, llm, content_generator_config: Dict[str, Any], config_conversation: Dict[str, Any]):
+        self.llm = llm
+        self.content_generator_config = content_generator_config
+        self.config_conversation = config_conversation
+    
+    def validate(self, input_texts: str, image_file_paths: List[str]) -> None:
+        """No specific validation needed for single host content."""
+        pass
+        
+    def generate(self, 
+                chain,
+                input_texts: str,
+                prompt_params: Dict[str, Any],
+                **kwargs) -> str:
+        """Generate single host content."""
+        if kwargs.get('longform', False):
+            generator = LongFormContentGenerator(chain, self.llm, self.config_conversation)
+            return generator.generate_long_form(
+                input_texts,
+                prompt_params
+            )
+        return chain.invoke(prompt_params)
+        
+    def clean(self, 
+             response: str,
+             config: Dict[str, Any]) -> str:
+        """Clean the generated response and wrap in Person1 tags for TTS compatibility."""
+        # First apply standard cleaning with Person1 tag
+        cleaned = self._clean_tts_markup(response, additional_tags=["Person1"])
+        
+        # Convert any Host tags to Person1 tags for TTS compatibility
+        cleaned = cleaned.replace('<Host>', '<Person1>').replace('</Host>', '</Person1>')
+        
+        # Ensure content is wrapped in Person1 tags
+        if not cleaned.startswith('<Person1>'):
+            cleaned = f"<Person1>{cleaned}</Person1>"
+            
+        # Clean up any potential double tags
+        cleaned = re.sub(r'</Person1>\s*<Person1>', ' ', cleaned)
+        
+        # Ensure proper spacing and formatting
+        cleaned = re.sub(r'\s+', ' ', cleaned)
+        cleaned = cleaned.replace(' .', '.').replace(' ,', ',')
+        
+        return cleaned.strip()
+
+    def compose_prompt_params(self,
+                            config_conversation: Dict[str, Any],
+                            image_file_paths: List[str] = [],
+                            image_path_keys: List[str] = [],
+                            input_texts: str = "") -> Dict[str, Any]:
+        """Compose prompt parameters for single host content."""
+        # Use Person1 settings for consistency with TTS
+        return {
+            "host_role": config_conversation.get("host_role", "Expert podcast host"),
+            "podcast_name": config_conversation.get("podcast_name"),
+            "podcast_tagline": config_conversation.get("podcast_tagline"),
+            "output_language": config_conversation.get("output_language"),
+            "engagement_techniques": ", ".join(
+                config_conversation.get("engagement_techniques", [])
+            ),
+        }
+
+
 class ContentGenerator:
     def __init__(
         self, 
@@ -757,89 +827,172 @@ class ContentGenerator:
 
         # Initialize strategies with configs
         self.strategies = {
-            True: LongFormContentStrategy(
+            ('conversation', False): StandardContentStrategy(
                 self.llm,
                 self.content_generator_config,
                 self.config_conversation
             ),
-            False: StandardContentStrategy(
+            ('conversation', True): LongFormContentStrategy(
+                self.llm,
+                self.content_generator_config,
+                self.config_conversation
+            ),
+            ('single_host', False): SingleHostContentStrategy(
+                self.llm,
+                self.content_generator_config,
+                self.config_conversation
+            ),
+            ('single_host', True): SingleHostContentStrategy(
                 self.llm,
                 self.content_generator_config,
                 self.config_conversation
             )
         }
 
-    def __compose_prompt(self, num_images: int, longform: bool=False):
+    def __compose_prompt(self, num_images: int, longform: bool=False, single_host: bool=False):
         """
-        Compose the prompt for the LLM based on the content list.
+        Compose the prompt for the LLM based on the content list and format type.
         """
         content_generator_config = self.config.get("content_generator", {})
         
-        # Get base template and commit values
-        base_template = content_generator_config.get("prompt_template")
-        base_commit = content_generator_config.get("prompt_commit")
-        
-        # Modify template and commit for longform if configured
-        if longform:
-            template = content_generator_config.get("longform_prompt_template")
-            commit = content_generator_config.get("longform_prompt_commit")
-        else:
-            template = base_template
-            commit = base_commit
+        # Define default templates for single host mode
+        DEFAULT_SINGLE_HOST_TEMPLATE = """You are an expert podcast host creating content for {podcast_name} - {podcast_tagline}.
+Your role is: {host_role}
 
-        prompt_template = hub.pull(f"{template}:{commit}")
+Generate a natural, engaging podcast script in {output_language}.
+Use these engagement techniques: {engagement_techniques}
 
-        image_path_keys = []
-        messages = []
+Important formatting rules:
+1. Format ALL content within <Host> tags
+2. Use natural speaking style
+3. Include introduction and conclusion
+4. Break complex topics into digestible segments
+5. Use clear transitions between topics
+6. Engage the audience directly
+7. Maintain consistent tone throughout
 
-        # Only add text content if input_text is not empty
-        text_content = {
-            "type": "text",
-            "text": "Please analyze this input and generate a conversation. {input_text}",
-        }
-        messages.append(text_content)
+Example format:
+<Host>Welcome to [Podcast Name]! I'm your host, and today we're diving into...</Host>
+<Host>Let's explore this fascinating topic...</Host>
+<Host>Thank you for listening! Don't forget to subscribe...</Host>
 
-        for i in range(num_images):
-            key = f"image_path_{i}"
-            image_content = {
-                "image_url": {"url": f"{{{key}}}", "detail": "high"},
-                "type": "image_url",
+Analyze the following content and create an engaging monologue:
+{input_text}"""
+
+        DEFAULT_SINGLE_HOST_LONGFORM_TEMPLATE = """You are an expert podcast host creating an in-depth, long-form episode for {podcast_name} - {podcast_tagline}.
+Your role is: {host_role}
+
+Generate a comprehensive, detailed podcast script in {output_language}.
+Use these engagement techniques: {engagement_techniques}
+
+Important formatting rules:
+1. Format ALL content within <Host> tags
+2. Create an extended, detailed exploration of the topic
+3. Include detailed examples and case studies
+4. Provide thorough analysis and multiple perspectives
+5. Use storytelling techniques for engagement
+6. Break complex information into digestible segments
+7. Maintain energy and engagement throughout the extended format
+
+Example format:
+<Host>Welcome to a special in-depth episode of [Podcast Name]! I'm your host, and today we're taking a deep dive into...</Host>
+<Host>Let's begin by exploring the fundamental concepts...</Host>
+<Host>Now that we've covered the basics, let's delve deeper into...</Host>
+<Host>Thank you for joining me on this comprehensive exploration! Until next time...</Host>
+
+Analyze the following content and create an engaging long-form monologue:
+{input_text}"""
+
+        try:
+            if single_host:
+                base_template = content_generator_config.get("single_host_prompt_template", "podcastfy/single-host-prompt")
+                base_commit = content_generator_config.get("single_host_prompt_commit", "main")
+                
+                if longform:
+                    template = content_generator_config.get("single_host_longform_prompt_template", base_template)
+                    commit = content_generator_config.get("single_host_longform_prompt_commit", base_commit)
+                else:
+                    template = base_template
+                    commit = base_commit
+
+                try:
+                    prompt_template = hub.pull(f"{template}:{commit}")
+                except Exception as e:
+                    logger.warning(f"Failed to load single host template from hub: {str(e)}")
+                    # Use default template
+                    template_str = DEFAULT_SINGLE_HOST_LONGFORM_TEMPLATE if longform else DEFAULT_SINGLE_HOST_TEMPLATE
+                    prompt_template = ChatPromptTemplate.from_template(template_str)
+            else:
+                base_template = content_generator_config.get("prompt_template")
+                base_commit = content_generator_config.get("prompt_commit")
+                
+                if longform:
+                    template = content_generator_config.get("longform_prompt_template")
+                    commit = content_generator_config.get("longform_prompt_commit")
+                else:
+                    template = base_template
+                    commit = base_commit
+
+                prompt_template = hub.pull(f"{template}:{commit}")
+
+            image_path_keys = []
+            messages = []
+
+            # Only add text content if input_text is not empty
+            text_content = {
+                "type": "text",
+                "text": "Please analyze this input and generate a " + 
+                       ("monologue" if single_host else "conversation") + 
+                       ". {input_text}",
             }
-            image_path_keys.append(key)
-            messages.append(image_content)
+            messages.append(text_content)
 
-        user_prompt_template = ChatPromptTemplate.from_messages(
-            messages=[HumanMessagePromptTemplate.from_template(messages)]
-        )
-        user_instructions = self.config_conversation.get("user_instructions", "")
+            for i in range(num_images):
+                key = f"image_path_{i}"
+                image_content = {
+                    "image_url": {"url": f"{{{key}}}", "detail": "high"},
+                    "type": "image_url",
+                }
+                image_path_keys.append(key)
+                messages.append(image_content)
 
-        user_instructions = (
-            "[[MAKE SURE TO FOLLOW THESE INSTRUCTIONS OVERRIDING THE PROMPT TEMPLATE IN CASE OF CONFLICT: "
-            + user_instructions
-            + "]]"
-        )
+            user_prompt_template = ChatPromptTemplate.from_messages(
+                messages=[HumanMessagePromptTemplate.from_template(messages)]
+            )
+            user_instructions = self.config_conversation.get("user_instructions", "")
 
-        new_system_message = (
-            prompt_template.messages[0].prompt.template + "\n" + user_instructions
-        )
+            user_instructions = (
+                "[[MAKE SURE TO FOLLOW THESE INSTRUCTIONS OVERRIDING THE PROMPT TEMPLATE IN CASE OF CONFLICT: "
+                + user_instructions
+                + "]]"
+            )
 
-        # Compose messages from podcastfy_prompt_template and user_prompt_template
-        combined_messages = (
-            ChatPromptTemplate.from_messages([new_system_message]).messages
-            + user_prompt_template.messages
-        )
+            new_system_message = (
+                prompt_template.messages[0].prompt.template + "\n" + user_instructions
+            )
 
-        # Create a new ChatPromptTemplate object with the combined messages
-        composed_prompt_template = ChatPromptTemplate.from_messages(combined_messages)
+            # Compose messages from prompt_template and user_prompt_template
+            combined_messages = (
+                ChatPromptTemplate.from_messages([new_system_message]).messages
+                + user_prompt_template.messages
+            )
 
-        return composed_prompt_template, image_path_keys
+            # Create a new ChatPromptTemplate object with the combined messages
+            composed_prompt_template = ChatPromptTemplate.from_messages(combined_messages)
+
+            return composed_prompt_template, image_path_keys
+
+        except Exception as e:
+            logger.error(f"Error composing prompt: {str(e)}")
+            raise
 
     def generate_qa_content(
         self,
         input_texts: str = "",
         image_file_paths: List[str] = [],
         output_filepath: Optional[str] = None,
-        longform: bool = False
+        longform: bool = False,
+        single_host: bool = False
     ) -> str:
         """
         Generate Q&A content based on input texts.
@@ -852,6 +1005,7 @@ class ContentGenerator:
             model_name (str): Model name to use for generation.
             api_key_label (str): Environment variable name for API key.
             longform (bool): Whether to generate long-form content. Defaults to False.
+            single_host (bool): Whether to generate single-host content. Defaults to False.
 
         Returns:
             str: Generated conversation content
@@ -862,31 +1016,37 @@ class ContentGenerator:
         """
         try:
             # Get appropriate strategy
-            strategy = self.strategies[longform]
+            format_type = 'single_host' if single_host else 'conversation'
+            strategy = self.strategies[(format_type, longform)]
             
             # Validate inputs for chosen strategy
             strategy.validate(input_texts, image_file_paths)
 
             # Setup chain
             num_images = 0 if self.is_local else len(image_file_paths)
-            self.prompt_template, image_path_keys = self.__compose_prompt(num_images, longform)
+            self.prompt_template, image_path_keys = self.__compose_prompt(
+                num_images, 
+                longform=longform,
+                single_host=single_host
+            )
             self.parser = StrOutputParser()
             self.chain = self.prompt_template | self.llm | self.parser
 
-
-            # Prepare parameters using strategy
+            # Add input_text to prompt parameters
             prompt_params = strategy.compose_prompt_params(
                 self.config_conversation,
                 image_file_paths,
                 image_path_keys,
                 input_texts
             )
+            prompt_params["input_text"] = input_texts
 
             # Generate content using selected strategy
             self.response = strategy.generate(
                 self.chain,
                 input_texts,
-                prompt_params
+                prompt_params,
+                longform=longform
             )
 
             # Clean response using the same strategy

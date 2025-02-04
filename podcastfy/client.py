@@ -52,7 +52,8 @@ def process_content(
     model_name: Optional[str] = None,
     api_key_label: Optional[str] = None,
     topic: Optional[str] = None,
-    longform: bool = False
+    longform: bool = False,
+    single_host: bool = False
 ):
     """
     Process URLs, a transcript file, image paths, or raw text to generate a podcast or transcript.
@@ -117,7 +118,8 @@ def process_content(
                 combined_content,
                 image_file_paths=image_paths or [],
                 output_filepath=transcript_filepath,
-                longform=longform
+                longform=longform,
+                single_host=single_host
             )
 
         if generate_audio:
@@ -198,6 +200,12 @@ def main(
         "-lf", 
         help="Generate long-form content (only available for text input without images)"
     ),
+    single_host: bool = typer.Option(
+        False,
+        "--single-host",
+        "-sh",
+        help="Generate single host podcast instead of conversation",
+    ),
 ):
     """
     Generate a podcast or transcript from a list of URLs, a file containing URLs, a transcript file, image files, or raw text.
@@ -214,7 +222,7 @@ def main(
 
         # Use default TTS model from conversation config if not specified
         if tts_model is None:
-            tts_config = load_conversation_config().get("text_to_speech", {})
+            tts_config = load_conversation_config(conversation_config).get("text_to_speech", {})
             tts_model = tts_config.get("default_tts_model", "openai")
 
         if transcript:
@@ -231,7 +239,8 @@ def main(
                 model_name=llm_model_name,
                 api_key_label=api_key_label,
                 topic=topic,
-                longform=longform
+                longform=longform,
+                single_host=single_host
             )
         else:
             urls_list = urls or []
@@ -255,7 +264,8 @@ def main(
                 model_name=llm_model_name,
                 api_key_label=api_key_label,
                 topic=topic,
-                longform=longform
+                longform=longform,
+                single_host=single_host
             )
 
         if transcript_only:
@@ -289,6 +299,7 @@ def generate_podcast(
     api_key_label: Optional[str] = None,
     topic: Optional[str] = None,
     longform: bool = False,
+    single_host: bool = False
 ) -> Optional[str]:
     """
     Generate a podcast or transcript from a list of URLs, a file containing URLs, a transcript file, or image files.
@@ -307,6 +318,7 @@ def generate_podcast(
         llm_model_name (Optional[str]): LLM model name for content generation.
         api_key_label (Optional[str]): Environment variable name for LLM API key.
         topic (Optional[str]): Topic to generate podcast about.
+        single_host (bool): Generate single host podcast instead of conversation. Defaults to False.
 
     Returns:
         Optional[str]: Path to the final podcast audio file, or None if only generating a transcript.
@@ -355,7 +367,8 @@ def generate_podcast(
                 model_name=llm_model_name,
                 api_key_label=api_key_label,
                 topic=topic,
-                longform=longform
+                longform=longform,
+                single_host=single_host
             )
         else:
             urls_list = urls or []
@@ -381,7 +394,8 @@ def generate_podcast(
                 model_name=llm_model_name,
                 api_key_label=api_key_label,
                 topic=topic,
-                longform=longform
+                longform=longform,
+                single_host=single_host
             )
 
     except Exception as e:
