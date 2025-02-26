@@ -168,6 +168,8 @@ class TextToSpeech:
                 voice = provider_config.get("default_voices", {}).get(speaker_type)
                 model = provider_config.get("model")
 
+                logger.info(f"Generating audio for {speaker_type} with voice {voice} and model {model}")
+                
                 audio_data = self.provider.generate_audio(content, voice, model)
                 with open(temp_file, "wb") as f:
                     f.write(audio_data)

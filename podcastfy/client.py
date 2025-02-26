@@ -18,8 +18,18 @@ from podcastfy.utils.config_conversation import load_conversation_config
 from podcastfy.utils.logger import setup_logger
 from typing import List, Optional, Dict, Any
 import copy
+import sys
+import inspect
 
 import logging
+
+print("File path:", os.path.abspath(__file__)) 
+print("Python path:", sys.path)
+print("Working directory:", os.getcwd())
+print("ContentGenerator module:", ContentGenerator.__module__)
+print("ContentGenerator file:", inspect.getfile(ContentGenerator))
+
+
 
 # Configure logging to show all levels and write to both file and console
 """ logging.basicConfig(
@@ -59,14 +69,20 @@ def process_content(
     Process URLs, a transcript file, image paths, or raw text to generate a podcast or transcript.
     """
     try:
+        # Add debug logging
+        logger.info(f"Process content called with params: urls={urls}, tts_model={tts_model}, "
+                    f"is_local={is_local}, longform={longform}, single_host={single_host}")
+        
         if config is None:
             config = load_config()
+            logger.info("Loaded default config")
 
         # Load default conversation config
         conv_config = load_conversation_config()
+        logger.info(f"Loaded conversation config: {conv_config}")
 
-        # Update with provided config if any
         if conversation_config:
+            logger.info(f"Updating conversation config with: {conversation_config}")
             conv_config.configure(conversation_config)
         # Get output directories from conversation config
         tts_config = conv_config.get("text_to_speech", {})
@@ -93,6 +109,7 @@ def process_content(
             
             if urls:
                 logger.info(f"Processing {len(urls)} links")
+                
                 contents = [content_extractor.extract_content(link) for link in urls]
                 combined_content += "\n\n".join(contents)
 
@@ -114,13 +131,22 @@ def process_content(
                 output_directories.get("transcripts", "data/transcripts"),
                 random_filename,
             )
-            qa_content = content_generator.generate_qa_content(
-                combined_content,
-                image_file_paths=image_paths or [],
-                output_filepath=transcript_filepath,
-                longform=longform,
-                single_host=single_host
-            )
+            # Before calling generate_qa_content, log the parameters
+            logger.info(f"Calling generate_qa_content with longform={longform}, single_host={single_host}");
+            logger.info(f"11names: {conv_config.get('names_person1')}");
+
+            try:
+                qa_content = content_generator.generate_qa_content(
+                    combined_content,
+                    image_file_paths=image_paths or [],
+                    output_filepath=transcript_filepath,
+                    longform=longform,
+                    single_host=single_host
+                )
+            except TypeError as e:
+                logger.error(f"TypeError in generate_qa_content: {str(e)}")
+                logger.error("This might indicate a mismatch in method parameters")
+                raise
 
         if generate_audio:
             api_key = None
@@ -146,6 +172,7 @@ def process_content(
 
     except Exception as e:
         logger.error(f"An error occurred in the process_content function: {str(e)}")
+        logger.error(f"Full error details:", exc_info=True)  # This will print the full stack trace
         raise
 
 

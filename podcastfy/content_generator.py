@@ -22,8 +22,9 @@ from podcastfy.utils.config import load_config
 import logging
 from langchain.prompts import HumanMessagePromptTemplate
 from abc import ABC, abstractmethod
+from podcastfy.utils.logger import setup_logger
 
-logger = logging.getLogger(__name__)
+logger = setup_logger("content_generator")
 
 
 class LLMBackend:
@@ -170,7 +171,7 @@ class LongFormContentGenerator:
                               total_parts: int,
                               chat_context: str) -> Dict:
         """
-        Enhance prompt parameters for long-form content generation.
+        Enhance prompt parameters for dynamic, natural podcast conversation generation.
         
         Args:
             prompt_params (Dict): Original prompt parameters
@@ -182,38 +183,67 @@ class LongFormContentGenerator:
             Dict: Enhanced prompt parameters with part-specific instructions
         """
         enhanced_params = prompt_params.copy()
-		# Initialize part_instructions with chat context
         enhanced_params["context"] = chat_context
-        
+
         COMMON_INSTRUCTIONS = """
-            Podcast conversation so far is given in CONTEXT.
-            Continue the natural flow of conversation. Follow-up on the very previous point/question without repeating topics or points already discussed!
-            Hence, the transition should be smooth and natural. Avoid abrupt transitions.
-            Make sure the first to speak is different from the previous speaker. Look at the last tag in CONTEXT to determine the previous speaker. 
-            If last tag in CONTEXT is <Person1>, then the first to speak now should be <Person2>.
-            If last tag in CONTEXT is <Person2>, then the first to speak now should be <Person1>.
-            This is a live conversation without any breaks.
-            Hence, avoid statemeents such as "we'll discuss after a short break.  Stay tuned" or "Okay, so, picking up where we left off".
-        """ 
+        Podcast conversation so far is given in CONTEXT.
+        Continue the natural flow of conversation. Follow-up on the very previous point/question without repeating topics or points already discussed!
+        
+        Make the conversation dynamic and engaging by:
+        - Having hosts occasionally disagree or present different perspectives
+        - Asking follow-up questions to dig deeper into interesting points
+        - Express emotions and reactions naturally (excitement, concern, skepticism)
+        
+        Important!!:
+        - Avoid Simply agreeing with everything the other person says
+        - Avoid Using filler phrases like "absolutely" or "totally" too frequently
+        - Avoid Making the conversation feel like a scripted presentation
+
+        Make sure the first to speak is different from the previous speaker. Look at the last tag in CONTEXT to determine the previous speaker. 
+        If last tag in CONTEXT is <Person1>, then the first to speak now should be <Person2>.
+        If last tag in CONTEXT is <Person2>, then the first to speak now should be <Person1>.
+        This is a live conversation without any breaks.
+        Hence, avoid statements such as "we'll discuss after a short break" or "Okay, so, picking up where we left off".
+        """
 
         # Add part-specific instructions
         if part_idx == 0:
             enhanced_params["instruction"] = f"""
             ALWAYS START THE CONVERSATION GREETING THE AUDIENCE: Welcome to {enhanced_params["podcast_name"]} - {enhanced_params["podcast_tagline"]}.
             You are generating the Introduction part of a long podcast conversation.
-            Don't cover any topics yet, just introduce yourself and the topic. Leave the rest for later parts, following these guidelines:
+            Make the introduction engaging by:
+            - Having hosts briefly share why they're personally interested in today's topic
+            - Creating anticipation for the discussion ahead
+            - Using a hook or compelling question to grab audience attention
+            Don't cover any topics yet, just introduce yourself and the topic. Leave the rest for later parts.
             """
+
+#            if self.config_conversation.get("names_person1"):
+ #               enhanced_params["instruction"] += f"Your name is: {self.config_conversation.get('names_person1')}"
+   #         if self.config_conversation.get("names_person2"):
+  #              enhanced_params["instruction"] += f"Your co-host name is: {self.config_conversation.get('names_person2')}"
+
+    #        enhanced_params["instruction"] += """In this section the host and co-host MUST introduce themselves by their names!"""
+
         elif part_idx == total_parts - 1:
             enhanced_params["instruction"] = f"""
             You are generating the last part of a long podcast conversation. 
             {COMMON_INSTRUCTIONS}
-            For this part, discuss the below INPUT and then make concluding remarks in a podcast conversation format and END THE CONVERSATION GREETING THE AUDIENCE WITH PERSON1 ALSO SAYING A GOOD BYE MESSAGE, following these guidelines:
+            For this part:
+            - Reflect on key insights from the discussion
+            - Share final thoughts that might differ between hosts
+            - Address any lingering questions
+            - End with a natural conclusion and farewell message
             """
         else:
             enhanced_params["instruction"] = f"""
             You are generating part {part_idx+1} of {total_parts} parts of a long podcast conversation.
             {COMMON_INSTRUCTIONS}
-            For this part, discuss the below INPUT in a podcast conversation format, following these guidelines:
+            For this part:
+            - Dive deep into one or two aspects rather than covering everything superficially
+            - Have hosts share different perspectives based on their experiences
+            - Use follow-up questions to explore interesting points
+            - Express genuine reactions and emotions
             """
         
         return enhanced_params
@@ -434,6 +464,8 @@ class StandardContentStrategy(ContentGenerationStrategy, ContentCleanerMixin):
             ),
             "roles_person1": config_conversation.get("roles_person1"),
             "roles_person2": config_conversation.get("roles_person2"),
+            "names_person1": config_conversation.get("names_person1"),
+            "names_person2": config_conversation.get("names_person2"),
             "dialogue_structure": ", ".join(
                 config_conversation.get("dialogue_structure", [])
             ),
@@ -691,6 +723,8 @@ class LongFormContentStrategy(ContentGenerationStrategy, ContentCleanerMixin):
             ),
             "roles_person1": config_conversation.get("roles_person1"),
             "roles_person2": config_conversation.get("roles_person2"),
+            "names_person1": config_conversation.get("names_person1"),
+            "names_person2": config_conversation.get("names_person2"),
             "dialogue_structure": ", ".join(
                 config_conversation.get("dialogue_structure", [])
             ),
@@ -722,6 +756,7 @@ class SingleHostContentStrategy(ContentGenerationStrategy, ContentCleanerMixin):
                 input_texts: str,
                 prompt_params: Dict[str, Any],
                 **kwargs) -> str:
+        
         """Generate single host content."""
         if kwargs.get('longform', False):
             generator = LongFormContentGenerator(chain, self.llm, self.config_conversation)
@@ -735,11 +770,14 @@ class SingleHostContentStrategy(ContentGenerationStrategy, ContentCleanerMixin):
              response: str,
              config: Dict[str, Any]) -> str:
         """Clean the generated response and wrap in Person1 tags for TTS compatibility."""
-        # First apply standard cleaning with Person1 tag
-        cleaned = self._clean_tts_markup(response, additional_tags=["Person1"])
         
         # Convert any Host tags to Person1 tags for TTS compatibility
-        cleaned = cleaned.replace('<Host>', '<Person1>').replace('</Host>', '</Person1>')
+        cleaned = response.replace('<Host>', '<Person1>').replace('</Host>', '</Person1>')
+
+        # First apply standard cleaning with Person1 tag
+        cleaned = self._clean_tts_markup(cleaned, additional_tags=["Person1"])
+        
+        
         
         # Ensure content is wrapped in Person1 tags
         if not cleaned.startswith('<Person1>'):
@@ -763,11 +801,19 @@ class SingleHostContentStrategy(ContentGenerationStrategy, ContentCleanerMixin):
         # Use Person1 settings for consistency with TTS
         return {
             "host_role": config_conversation.get("host_role", "Expert podcast host"),
+            "names_person1": config_conversation.get("names_person1"),
             "podcast_name": config_conversation.get("podcast_name"),
             "podcast_tagline": config_conversation.get("podcast_tagline"),
             "output_language": config_conversation.get("output_language"),
             "engagement_techniques": ", ".join(
                 config_conversation.get("engagement_techniques", [])
+            ),
+            "conversation_style": ", ".join(
+                config_conversation.get("conversation_style", [])
+            ),
+            "roles_person1": config_conversation.get("roles_person1"),
+            "dialogue_structure": ", ".join(
+                config_conversation.get("dialogue_structure", [])
             ),
         }
 
@@ -854,63 +900,16 @@ class ContentGenerator:
         Compose the prompt for the LLM based on the content list and format type.
         """
         content_generator_config = self.config.get("content_generator", {})
-        
-        # Define default templates for single host mode
-        DEFAULT_SINGLE_HOST_TEMPLATE = """You are an expert podcast host creating content for {podcast_name} - {podcast_tagline}.
-Your role is: {host_role}
 
-Generate a natural, engaging podcast script in {output_language}.
-Use these engagement techniques: {engagement_techniques}
-
-Important formatting rules:
-1. Format ALL content within <Host> tags
-2. Use natural speaking style
-3. Include introduction and conclusion
-4. Break complex topics into digestible segments
-5. Use clear transitions between topics
-6. Engage the audience directly
-7. Maintain consistent tone throughout
-
-Example format:
-<Host>Welcome to [Podcast Name]! I'm your host, and today we're diving into...</Host>
-<Host>Let's explore this fascinating topic...</Host>
-<Host>Thank you for listening! Don't forget to subscribe...</Host>
-
-Analyze the following content and create an engaging monologue:
-{input_text}"""
-
-        DEFAULT_SINGLE_HOST_LONGFORM_TEMPLATE = """You are an expert podcast host creating an in-depth, long-form episode for {podcast_name} - {podcast_tagline}.
-Your role is: {host_role}
-
-Generate a comprehensive, detailed podcast script in {output_language}.
-Use these engagement techniques: {engagement_techniques}
-
-Important formatting rules:
-1. Format ALL content within <Host> tags
-2. Create an extended, detailed exploration of the topic
-3. Include detailed examples and case studies
-4. Provide thorough analysis and multiple perspectives
-5. Use storytelling techniques for engagement
-6. Break complex information into digestible segments
-7. Maintain energy and engagement throughout the extended format
-
-Example format:
-<Host>Welcome to a special in-depth episode of [Podcast Name]! I'm your host, and today we're taking a deep dive into...</Host>
-<Host>Let's begin by exploring the fundamental concepts...</Host>
-<Host>Now that we've covered the basics, let's delve deeper into...</Host>
-<Host>Thank you for joining me on this comprehensive exploration! Until next time...</Host>
-
-Analyze the following content and create an engaging long-form monologue:
-{input_text}"""
-
+        logger.info("start compose prompt");
         try:
             if single_host:
-                base_template = content_generator_config.get("single_host_prompt_template", "podcastfy/single-host-prompt")
-                base_commit = content_generator_config.get("single_host_prompt_commit", "main")
+                base_template = content_generator_config.get("single_host_prompt_template")
+                base_commit = content_generator_config.get("single_host_prompt_commit")
                 
                 if longform:
-                    template = content_generator_config.get("single_host_longform_prompt_template", base_template)
-                    commit = content_generator_config.get("single_host_longform_prompt_commit", base_commit)
+                    template = content_generator_config.get("longform_single_host_prompt_template", base_template)
+                    commit = content_generator_config.get("longform_single_host_prompt_commit", base_commit)
                 else:
                     template = base_template
                     commit = base_commit
@@ -919,9 +918,7 @@ Analyze the following content and create an engaging long-form monologue:
                     prompt_template = hub.pull(f"{template}:{commit}")
                 except Exception as e:
                     logger.warning(f"Failed to load single host template from hub: {str(e)}")
-                    # Use default template
-                    template_str = DEFAULT_SINGLE_HOST_LONGFORM_TEMPLATE if longform else DEFAULT_SINGLE_HOST_TEMPLATE
-                    prompt_template = ChatPromptTemplate.from_template(template_str)
+                   
             else:
                 base_template = content_generator_config.get("prompt_template")
                 base_commit = content_generator_config.get("prompt_commit")
@@ -1015,6 +1012,7 @@ Analyze the following content and create an engaging long-form monologue:
             Exception: If there's an error in generating content.
         """
         try:
+            logger.info(f"generate_qa_content, single_host: {single_host}")
             # Get appropriate strategy
             format_type = 'single_host' if single_host else 'conversation'
             strategy = self.strategies[(format_type, longform)]
@@ -1024,6 +1022,9 @@ Analyze the following content and create an engaging long-form monologue:
 
             # Setup chain
             num_images = 0 if self.is_local else len(image_file_paths)
+
+            logger.info(f"making prompt");
+
             self.prompt_template, image_path_keys = self.__compose_prompt(
                 num_images, 
                 longform=longform,
