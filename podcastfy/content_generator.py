@@ -100,18 +100,21 @@ class LongFormContentGenerator:
         7. Generate a long conversation - output max_output_tokens tokens
     """
     
-    def __init__(self, chain, llm, config_conversation: Dict[str, Any], ):
+    def __init__(self, chain, llm, config_conversation: Dict[str, Any], single_host: bool = False):
         """
         Initialize ConversationGenerator.
         
         Args:
             llm_chain: The LangChain chain to use for generation
             config_conversation: Conversation configuration dictionary
+            single_host: Whether this is single host content (True) or conversation (False)
         """
         self.llm_chain = chain
         self.llm = llm
+        self.single_host = single_host
         self.max_num_chunks = config_conversation.get("max_num_chunks", 10)  # Default if not in config
         self.min_chunk_size = config_conversation.get("min_chunk_size", 200)  # Default if not in config
+        self.config_conversation = config_conversation
 
     def __calculate_chunk_size(self, input_content: str) -> int:
         """
@@ -171,7 +174,7 @@ class LongFormContentGenerator:
                               total_parts: int,
                               chat_context: str) -> Dict:
         """
-        Enhance prompt parameters for dynamic, natural podcast conversation generation.
+        Enhance prompt parameters for dynamic, natural podcast content generation.
         
         Args:
             prompt_params (Dict): Original prompt parameters
@@ -185,66 +188,103 @@ class LongFormContentGenerator:
         enhanced_params = prompt_params.copy()
         enhanced_params["context"] = chat_context
 
+        # Common instructions for both conversation and single_host modes
         COMMON_INSTRUCTIONS = """
-        Podcast conversation so far is given in CONTEXT.
-        Continue the natural flow of conversation. Follow-up on the very previous point/question without repeating topics or points already discussed!
+        Previous podcast content is given in CONTEXT.
+        Continue the natural flow of the content. Follow-up on the very previous point/question without repeating topics or points already discussed!
         
-        Make the conversation dynamic and engaging by:
-        - Having hosts occasionally disagree or present different perspectives
-        - Asking follow-up questions to dig deeper into interesting points
-        - Express emotions and reactions naturally (excitement, concern, skepticism)
+        Make the content dynamic and engaging by:
+        - Expressing emotions and reactions naturally (excitement, concern, skepticism)
+        - Using varied tone and pacing
         
         Important!!:
-        - Avoid Simply agreeing with everything the other person says
+        - Avoid Simply restating points already covered
         - Avoid Using filler phrases like "absolutely" or "totally" too frequently
-        - Avoid Making the conversation feel like a scripted presentation
-
-        Make sure the first to speak is different from the previous speaker. Look at the last tag in CONTEXT to determine the previous speaker. 
-        If last tag in CONTEXT is <Person1>, then the first to speak now should be <Person2>.
-        If last tag in CONTEXT is <Person2>, then the first to speak now should be <Person1>.
-        This is a live conversation without any breaks.
-        Hence, avoid statements such as "we'll discuss after a short break" or "Okay, so, picking up where we left off".
+        - Avoid Making the content feel like a scripted presentation
         """
+
+        # Different handling based on content type and part index
+        if not self.single_host:
+            # Original conversation mode instructions
+            COMMON_INSTRUCTIONS += """
+            Make sure the first to speak is different from the previous speaker. Look at the last tag in CONTEXT to determine the previous speaker. 
+            If last tag in CONTEXT is <Person1>, then the first to speak now should be <Person2>.
+            If last tag in CONTEXT is <Person2>, then the first to speak now should be <Person1>.
+            This is a live conversation without any breaks.
+            Hence, avoid statements such as "we'll discuss after a short break" or "Okay, so, picking up where we left off".
+            """
 
         # Add part-specific instructions
         if part_idx == 0:
-            enhanced_params["instruction"] = f"""
-            ALWAYS START THE CONVERSATION GREETING THE AUDIENCE: Welcome to {enhanced_params["podcast_name"]} - {enhanced_params["podcast_tagline"]}.
-            You are generating the Introduction part of a long podcast conversation.
-            Make the introduction engaging by:
-            - Having hosts briefly share why they're personally interested in today's topic
-            - Creating anticipation for the discussion ahead
-            - Using a hook or compelling question to grab audience attention
-            Don't cover any topics yet, just introduce yourself and the topic. Leave the rest for later parts.
+            welcome_msg = f"""Welcome to {enhanced_params.get("podcast_name", "the podcast")} - {enhanced_params.get("podcast_tagline", "")}.
             """
-
-#            if self.config_conversation.get("names_person1"):
- #               enhanced_params["instruction"] += f"Your name is: {self.config_conversation.get('names_person1')}"
-   #         if self.config_conversation.get("names_person2"):
-  #              enhanced_params["instruction"] += f"Your co-host name is: {self.config_conversation.get('names_person2')}"
-
-    #        enhanced_params["instruction"] += """In this section the host and co-host MUST introduce themselves by their names!"""
+            
+            if not self.single_host:
+                enhanced_params["instruction"] = f"""
+                ALWAYS START THE CONVERSATION GREETING THE AUDIENCE: {welcome_msg}
+                You are generating the Introduction part of a long podcast conversation.
+                Make the introduction engaging by:
+                - Having hosts briefly share why they're personally interested in today's topic
+                - Creating anticipation for the discussion ahead
+                - Using a hook or compelling question to grab audience attention
+                Don't cover any topics yet, just introduce yourself and the topic. Leave the rest for later parts.
+                """
+            else:  # single_host mode
+                enhanced_params["instruction"] = f"""
+                ALWAYS START THE MONOLOGUE GREETING THE AUDIENCE: {welcome_msg}
+                You are generating the Introduction part of a long podcast monologue.
+                Make the introduction engaging by:
+                - Briefly sharing why you're personally interested in today's topic
+                - Creating anticipation for the content ahead
+                - Using a hook or compelling question to grab audience attention
+                Don't cover any topics in depth yet, just introduce yourself and the topic. Leave the rest for later parts.
+                """
 
         elif part_idx == total_parts - 1:
-            enhanced_params["instruction"] = f"""
-            You are generating the last part of a long podcast conversation. 
-            {COMMON_INSTRUCTIONS}
-            For this part:
-            - Reflect on key insights from the discussion
-            - Share final thoughts that might differ between hosts
-            - Address any lingering questions
-            - End with a natural conclusion and farewell message
-            """
+            if not self.single_host:
+                enhanced_params["instruction"] = f"""
+                You are generating the last part of a long podcast conversation. 
+                {COMMON_INSTRUCTIONS}
+                For this part:
+                - Reflect on key insights from the discussion
+                - Share final thoughts that might differ between hosts
+                - Address any lingering questions
+                - End with a natural conclusion and farewell message
+                """
+            else:  # single_host mode
+                enhanced_params["instruction"] = f"""
+                You are generating the last part of a long podcast monologue. 
+                {COMMON_INSTRUCTIONS}
+                For this part:
+                - Reflect on key insights covered
+                - Share final thoughts and takeaways
+                - Address any lingering questions the audience might have
+                - End with a natural conclusion and farewell message
+                DO NOT introduce the podcast or yourself again - this is the ending, not a new section.
+                """
         else:
-            enhanced_params["instruction"] = f"""
-            You are generating part {part_idx+1} of {total_parts} parts of a long podcast conversation.
-            {COMMON_INSTRUCTIONS}
-            For this part:
-            - Dive deep into one or two aspects rather than covering everything superficially
-            - Have hosts share different perspectives based on their experiences
-            - Use follow-up questions to explore interesting points
-            - Express genuine reactions and emotions
-            """
+            if not self.single_host:
+                enhanced_params["instruction"] = f"""
+                You are generating part {part_idx+1} of {total_parts} parts of a long podcast conversation.
+                {COMMON_INSTRUCTIONS}
+                For this part:
+                - Dive deep into one or two aspects rather than covering everything superficially
+                - Have hosts share different perspectives based on their experiences
+                - Use follow-up questions to explore interesting points
+                - Express genuine reactions and emotions
+                """
+            else:  # single_host mode
+                enhanced_params["instruction"] = f"""
+                You are generating part {part_idx+1} of {total_parts} parts of a long podcast monologue.
+                {COMMON_INSTRUCTIONS}
+                For this part:
+                - Dive deep into one or two aspects rather than covering everything superficially
+                - Share personal perspectives based on your experience
+                - Explore interesting points in depth
+                - Express genuine reactions and emotions
+                DO NOT introduce the podcast or yourself again - this is a continuation, not a new section.
+                Avoid phrases like "Welcome back" or "As I was saying earlier" that imply a break.
+                """
         
         return enhanced_params
 
@@ -298,18 +338,68 @@ class LongFormContentGenerator:
     
     def stitch_conversations(self, parts: List[str]) -> str:
         """
-        Combine conversation parts with smooth transitions.
+        Combine conversation parts with smooth transitions, removing redundant introductions.
         
         Args:
             parts (List[str]): List of conversation parts
             
         Returns:
-            str: Combined conversation
+            str: Combined conversation with redundant elements removed
         """
-        # Simply join the parts, preserving all markup
-        return "\n".join(parts)
-
-
+        print(f"Stitching {len(parts)} parts")
+        
+        if len(parts) <= 1:
+            return "\n".join(parts)
+        
+        # For single host mode, we need to remove redundant introductions in later parts
+        if self.single_host:
+            # Get the podcast name and tagline to detect repetitions
+            podcast_name = self.config_conversation.get("podcast_name", "").lower()
+            podcast_tagline = self.config_conversation.get("podcast_tagline", "").lower()
+            host_name = self.config_conversation.get("names_person1", "").lower()
+            
+            # Keep the first part as is
+            result = [parts[0]]
+            
+            # For subsequent parts, detect and remove redundant introductions
+            for i in range(1, len(parts)):
+                current_part = parts[i]
+                
+                # Check for redundant welcome/introduction patterns
+                # Common introduction patterns to remove
+                import re
+                intro_patterns = [
+                    r"<Person1>\s*Welcome to.*?path to success\.",
+                    r"<Person1>\s*Welcome.*?" + re.escape(podcast_name) if podcast_name else "",
+                    r"<Person1>\s*I'm.*?" + re.escape(host_name) if host_name else "",
+                    r"<Person1>\s*Today we're (?:continuing|diving|delving)"
+                ]
+                
+                # Apply all patterns that are non-empty
+                filtered_patterns = [p for p in intro_patterns if p]
+                for pattern in filtered_patterns:
+                    try:
+                        current_part = re.sub(pattern, "<Person1>", current_part, flags=re.IGNORECASE | re.DOTALL)
+                    except:
+                        # If regex fails, continue with original
+                        pass
+                        
+                # Remove any empty Person1 tags created
+                current_part = re.sub(r"<Person1>\s*</Person1>", "", current_part)
+                
+                # Ensure proper Person1 tag structure after removal
+                if not current_part.strip().startswith("<Person1>"):
+                    current_part = f"<Person1>{current_part.strip()}"
+                if not current_part.strip().endswith("</Person1>"):
+                    current_part = f"{current_part.strip()}</Person1>"
+                
+                result.append(current_part)
+            
+            return "\n".join(result)
+        else:
+            # For conversation mode, simply join the parts as before
+            return "\n".join(parts)
+        
 # Make BaseContentCleaner a mixin class
 class ContentCleanerMixin:
     """
@@ -345,6 +435,7 @@ class ContentCleanerMixin:
     ) -> str:
         """
         Remove unsupported TSS markup tags while preserving supported ones.
+        Also normalizes special characters that can cause issues with TTS systems.
         """
         try:
             if additional_tags is None:
@@ -366,9 +457,104 @@ class ContentCleanerMixin:
                     cleaned_text,
                     flags=re.DOTALL,
                 )
+                
+            # Replace special characters with standard ASCII equivalents
+            char_replacements = {
+                # Quotes
+                '"': '"',   # Left double quote
+                '"': '"',   # Right double quote
+                ''': "'",   # Left single quote
+                ''': "'",   # Right single quote
+                '′': "'",   # Prime
+                '″': '"',   # Double prime
+                '\u2019': "'",   # Right single quote
+                '\u2018': "'",   # Left single quote
+                '\u201A': "'",   # Single low-9 quote
+                '\u201B': "'",   # Single high-reversed-9 quote
+                '\u2032': "'",   # Prime
+                '\u2033': '"',   # Double prime
+                '\u00FC': 'u',   # U with umlaut
+                '\u00F6': 'o',   # O with umlaut
+                '\u00E4': 'a',   # A with umlaut
+                '\u00C4': 'A',   # A with umlaut
+                '\u00D6': 'O',   # O with umlaut
+                '\u00DC': 'U',   # U with umlaut
+                '\u00E9': 'e',   # E with acute
+                '\u00C9': 'E',   # E with acute
+                '\u00F1': 'n',   # N with tilde
+                '\u00F1': 'N',   # N with tilde
+                '\u015F': 's',   # Small letter sharp s
+                '\u0161': 'S',   # Capital letter sharp s
+                '\u0178': 'Y',   # Y with dot above
+                '\u017D': 'Z',   # Capital letter z with caron
+                '\u017E': 'z',   # Small letter z with caron
+                '\u0153': 'oe',  # OE ligature
+                '\u0152': 'OE',  # OE ligature
+                '\u0131': 'i',   # Dotless i
+                '\u0130': 'I',   # Dotless I
+                '\u0142': 'L',   # Capital letter l with stroke
+                '\u0141': 'l',   # Small letter l with stroke
+                '\u201D': '"',   # Right double quote
+                '\u201C': '"',   # Left double quote
+                '\u2019': "'",   # Right single quote
+                '\u2018': "'",   # Left single quote
 
-            return cleaned_text.strip()
+                
+                # Dashes and hyphens
+                '—': ' -- ',  # Em dash
+                '–': ' - ',   # En dash
+                '‐': '-',     # Hyphen
+                '‑': '-',     # Non-breaking hyphen
+                '−': '-',     # Minus
+                
+                # Ellipses
+                '…': '...',   # Ellipsis
+                
+                # Other punctuation
+                '•': '*',     # Bullet
+                '·': '*',     # Middle dot
+                '○': 'o',     # White circle
+                '●': '*',     # Black circle
+                '„': '"',     # Double low quote
+                '‚': "'",     # Single low quote
+                
+                # Spaces
+                '\u00A0': ' ',  # Non-breaking space
+                '\u2002': ' ',  # En space
+                '\u2003': ' ',  # Em space
+                '\u2004': ' ',  # Three-per-em space
+                '\u2005': ' ',  # Four-per-em space
+                '\u2006': ' ',  # Six-per-em space
+                '\u2007': ' ',  # Figure space
+                '\u2008': ' ',  # Punctuation space
+                '\u2009': ' ',  # Thin space
+                '\u200A': ' ',  # Hair space
+                '\u202F': ' ',  # Narrow no-break space
+                '\u205F': ' ',  # Medium mathematical space
+            }
             
+            # Apply all character replacements
+            for char, replacement in char_replacements.items():
+                if char in cleaned_text:
+                    cleaned_text = cleaned_text.replace(char, replacement)
+            
+            # Check for any remaining non-ASCII characters and log warnings
+            import unicodedata
+            non_ascii_chars = set()
+            for char in cleaned_text:
+                if ord(char) > 127 and char not in '<>/':  # Skip XML tags
+                    char_code = f"U+{ord(char):04X}"
+                    try:
+                        char_name = unicodedata.name(char).lower()
+                        non_ascii_chars.add(f"'{char}' ({char_name}, {char_code})")
+                    except ValueError:
+                        non_ascii_chars.add(f"'{char}' (unknown, {char_code})")
+            
+            if non_ascii_chars:
+                print(f"Found {len(non_ascii_chars)} potentially problematic characters for TTS: {', '.join(sorted(non_ascii_chars))}")
+            
+            return cleaned_text.strip()
+                
         except Exception as e:
             logger.error(f"Error cleaning TSS markup: {str(e)}")
             return input_text
@@ -759,7 +945,12 @@ class SingleHostContentStrategy(ContentGenerationStrategy, ContentCleanerMixin):
         
         """Generate single host content."""
         if kwargs.get('longform', False):
-            generator = LongFormContentGenerator(chain, self.llm, self.config_conversation)
+            generator = LongFormContentGenerator(
+                chain, 
+                self.llm, 
+                self.config_conversation,
+                single_host=True  # Pass the single_host flag
+            )
             return generator.generate_long_form(
                 input_texts,
                 prompt_params
@@ -816,8 +1007,7 @@ class SingleHostContentStrategy(ContentGenerationStrategy, ContentCleanerMixin):
                 config_conversation.get("dialogue_structure", [])
             ),
         }
-
-
+    
 class ContentGenerator:
     def __init__(
         self, 
@@ -998,9 +1188,6 @@ class ContentGenerator:
             input_texts (str): Input texts to generate content from.
             image_file_paths (List[str]): List of image file paths.
             output_filepath (Optional[str]): Filepath to save the response content.
-            is_local (bool): Whether to use a local LLM or not.
-            model_name (str): Model name to use for generation.
-            api_key_label (str): Environment variable name for API key.
             longform (bool): Whether to generate long-form content. Defaults to False.
             single_host (bool): Whether to generate single-host content. Defaults to False.
 
@@ -1050,6 +1237,8 @@ class ContentGenerator:
                 longform=longform
             )
 
+            print(f"Generated Response");
+
             # Clean response using the same strategy
             self.response = strategy.clean(
                 self.response,
@@ -1060,7 +1249,7 @@ class ContentGenerator:
 
             # Save output if requested
             if output_filepath:
-                with open(output_filepath, "w") as file:
+                with open(output_filepath, "w", encoding="utf-8") as file:
                     file.write(self.response)
                 logger.info(f"Response content saved to {output_filepath}")
                 print(f"Transcript saved to {output_filepath}")

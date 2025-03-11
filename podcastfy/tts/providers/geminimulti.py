@@ -78,6 +78,9 @@ class GeminiMultiTTS(TTSProvider):
         # Add final chunk if it exists
         if current_chunk:
             chunks.append(current_chunk)
+
+        for i, chunk in enumerate(chunks):
+            logger.debug(f"Chunk {i} size: {len(chunk.encode('utf-8'))} bytes")
             
         logger.info(f"Created {len(chunks)} chunks from input text")
         return chunks
@@ -129,6 +132,7 @@ class GeminiMultiTTS(TTSProvider):
         if current_chunk:
             chunks.append(current_chunk.strip())
             
+        
         return chunks
 
     def merge_audio(self, audio_chunks: List[bytes]) -> bytes:
@@ -289,73 +293,136 @@ class GeminiMultiTTS(TTSProvider):
         return audio_chunks
 
     def _generate_audio_multispeaker(self, text_chunks: List[str],
-                                   voice: str,
-                                   voice2: str,
-                                   model: str) -> List[bytes]:
+                               voice: str,
+                               voice2: str,
+                               model: str) -> List[bytes]:
         """
-        Generate audio using the multispeaker model.
-        
-        Args:
-            text_chunks: List of text chunks with speaker tags
-            voice: First speaker identifier
-            voice2: Second speaker identifier
-            model: Model name
-            
-        Returns:
-            List of audio chunks in bytes
+        Generate audio using the multispeaker model with smaller batches
+        to avoid the MultiSpeakerMarkup size limit.
         """
         audio_chunks = []
         
-        for i, chunk in enumerate(text_chunks, 1):
-            logger.debug(f"Processing chunk {i}/{len(text_chunks)}")
-            multi_speaker_markup = texttospeech_v1beta1.MultiSpeakerMarkup()
-            
+        # Much more conservative approach - process fewer turns per request
+        MAX_TURNS_PER_BATCH = 2  # Start with just 2 turns per batch
+        MAX_CHARS_PER_TURN = 200  # Limit characters per turn
+        
+        # Collect all turns across all chunks
+        all_turns = []
+        
+        # Process each chunk into turns
+        for chunk in text_chunks:
             qa_pairs = self.split_qa(chunk, "", self.get_supported_tags())
-            logger.debug(f"Found {len(qa_pairs)} Q&A pairs in chunk {i}")
             
-            for j, (question, answer) in enumerate(qa_pairs, 1):
-                logger.debug(f"Processing Q&A pair {j}/{len(qa_pairs)}")
-                
-                # Process question chunks
-                question_chunks = self.split_turn_text(question.strip())
+            for question, answer in qa_pairs:
+                # Split question into smaller chunks
+                question_chunks = self.split_turn_text(question.strip(), max_chars=MAX_CHARS_PER_TURN)
                 for q_chunk in question_chunks:
                     q_turn = texttospeech_v1beta1.MultiSpeakerMarkup.Turn()
                     q_turn.text = q_chunk
                     q_turn.speaker = voice
-                    multi_speaker_markup.turns.append(q_turn)
+                    all_turns.append(q_turn)
                 
-                # Process answer chunks
+                # Split answer into smaller chunks
                 if answer:
-                    answer_chunks = self.split_turn_text(answer.strip())
+                    answer_chunks = self.split_turn_text(answer.strip(), max_chars=MAX_CHARS_PER_TURN)
                     for a_chunk in answer_chunks:
                         a_turn = texttospeech_v1beta1.MultiSpeakerMarkup.Turn()
                         a_turn.text = a_chunk
                         a_turn.speaker = voice2
-                        multi_speaker_markup.turns.append(a_turn)
+                        all_turns.append(a_turn)
+        
+        # Process turns in small batches
+        for i in range(0, len(all_turns), MAX_TURNS_PER_BATCH):
+            # Get the current batch of turns
+            batch = all_turns[i:i + MAX_TURNS_PER_BATCH]
             
-            # Generate speech for the entire chunk
-            synthesis_input = texttospeech_v1beta1.SynthesisInput(
-                multi_speaker_markup=multi_speaker_markup
-            )
+            # Create markup for this batch
+            multi_speaker_markup = texttospeech_v1beta1.MultiSpeakerMarkup()
+            multi_speaker_markup.turns.extend(batch)
             
-            voice_params = texttospeech_v1beta1.VoiceSelectionParams(
-                language_code="en-US",
-                name=model
-            )
+            logger.info(f"Processing batch {i//MAX_TURNS_PER_BATCH + 1} with {len(batch)} turns")
             
-            audio_config = texttospeech_v1beta1.AudioConfig(
-                audio_encoding=texttospeech_v1beta1.AudioEncoding.MP3,
-                #sample_rate_hertz=44100,
-                #effects_profile_id=['headphone-class-device'],
-                #speaking_rate=1.0,
-            )
-            
-            response = self.client.synthesize_speech(
-                input=synthesis_input,
-                voice=voice_params,
-                audio_config=audio_config
-            )
-            audio_chunks.append(response.audio_content)
+            try:
+                synthesis_input = texttospeech_v1beta1.SynthesisInput(
+                    multi_speaker_markup=multi_speaker_markup
+                )
+                
+                voice_params = texttospeech_v1beta1.VoiceSelectionParams(
+                    language_code="en-US",
+                    name=model
+                )
+                
+                audio_config = texttospeech_v1beta1.AudioConfig(
+                    audio_encoding=texttospeech_v1beta1.AudioEncoding.MP3,
+                )
+                
+                response = self.client.synthesize_speech(
+                    input=synthesis_input,
+                    voice=voice_params,
+                    audio_config=audio_config
+                )
+                audio_chunks.append(response.audio_content)
+                
+            except Exception as e:
+                logger.error(f"Error processing batch: {str(e)}")
+                
+                if "MultiSpeakerMarkup is too long" in str(e):
+                    logger.warning("Batch still too large, processing turns individually")
+                    
+                    # If the batch is still too large, process each turn individually
+                    for turn in batch:
+                        # Try to process this single turn
+                        single_markup = texttospeech_v1beta1.MultiSpeakerMarkup()
+                        single_markup.turns.append(turn)
+                        
+                        try:
+                            single_input = texttospeech_v1beta1.SynthesisInput(
+                                multi_speaker_markup=single_markup
+                            )
+                            
+                            response = self.client.synthesize_speech(
+                                input=single_input,
+                                voice=voice_params,
+                                audio_config=audio_config
+                            )
+                            audio_chunks.append(response.audio_content)
+                            logger.info(f"Successfully processed single turn: '{turn.text[:30]}...'")
+                            
+                        except Exception as inner_e:
+                            logger.error(f"Failed to process single turn: {str(inner_e)}")
+                            
+                            # If even a single turn is too large, split it further
+                            if "MultiSpeakerMarkup is too long" in str(inner_e):
+                                logger.warning(f"Single turn too large, splitting further: '{turn.text[:30]}...'")
+                                
+                                # Split into tiny chunks and process each
+                                tiny_chunks = self.split_turn_text(turn.text, max_chars=100)
+                                for tiny_text in tiny_chunks:
+                                    tiny_turn = texttospeech_v1beta1.MultiSpeakerMarkup.Turn()
+                                    tiny_turn.text = tiny_text
+                                    tiny_turn.speaker = turn.speaker
+                                    
+                                    tiny_markup = texttospeech_v1beta1.MultiSpeakerMarkup()
+                                    tiny_markup.turns.append(tiny_turn)
+                                    
+                                    try:
+                                        tiny_input = texttospeech_v1beta1.SynthesisInput(
+                                            multi_speaker_markup=tiny_markup
+                                        )
+                                        
+                                        response = self.client.synthesize_speech(
+                                            input=tiny_input,
+                                            voice=voice_params,
+                                            audio_config=audio_config
+                                        )
+                                        audio_chunks.append(response.audio_content)
+                                        logger.info(f"Processed tiny chunk: '{tiny_text}'")
+                                        
+                                    except Exception as tiny_e:
+                                        logger.error(f"Failed to process tiny chunk: {str(tiny_e)}")
+                else:
+                    # If it's some other error, reraise it
+                    raise
         
         return audio_chunks
 
@@ -382,8 +449,8 @@ class GeminiMultiTTS(TTSProvider):
         Returns:
             List of audio chunks in bytes
         """
-        logger.info(f"Starting audio generation for text of length: {len(text)}")
-        logger.debug(f"Parameters: voice={voice}, voice2={voice2}, model={model}, " 
+        print(f"Starting audio generation for text of length: {len(text)}")
+        print(f"Parameters: voice={voice}, voice2={voice2}, model={model}, " 
                     f"use_individual_voices={use_individual_voices}")
         
         try:

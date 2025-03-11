@@ -92,6 +92,8 @@ class TextToSpeech:
 
         cleaned_text = text
 
+        logger.debug(f"Input text length: {len(cleaned_text)} bytes, characters: {len(cleaned_text)}")
+
         try:
 
             if (
@@ -169,7 +171,7 @@ class TextToSpeech:
                 model = provider_config.get("model")
 
                 logger.info(f"Generating audio for {speaker_type} with voice {voice} and model {model}")
-                
+
                 audio_data = self.provider.generate_audio(content, voice, model)
                 with open(temp_file, "wb") as f:
                     f.write(audio_data)

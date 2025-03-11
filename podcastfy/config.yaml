@@ -10,6 +10,10 @@ content_generator:
   cleaner_prompt_commit: "8c110a0b"
   rewriter_prompt_template: "souzatharsis/podcast_rewriter"
   rewriter_prompt_commit: "8ee296fb"
+  single_host_prompt_template: "yrex/podcastfy_monologue"
+  single_host_prompt_commit: "7b5e69e3"
+  longform_single_host_prompt_template: "skinnylegsjackson/podcastfy_monologue_longform"
+  longform_single_host_prompt_commit: "29d391ed"
 content_extractor:
   youtube_url_patterns:
     - "youtube.com"
